@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BILLIONS RUNNER (SUPERMASK NFT S2)</title>
+  <style>
+    :root{
+      --bg:#0f1020; --fg:#e6e6ef; --muted:#9aa0b4; --accent:#6cf; --danger:#ff5370;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    .wrap{display:grid;place-items:center;height:100%;padding:16px}
+    .frame{width:min(1100px,100%);background:#15162a;border-radius:18px;box-shadow:0 10px 40px rgba(0,0,0,.35);padding:16px;border:1px solid #20223c}
+    header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+    h1{font-size:clamp(16px,2.6vw,24px);margin:0;letter-spacing:.5px}
+    .btn{appearance:none;border:none;border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer;background:#222646;color:var(--fg);box-shadow:inset 0 0 0 1px #2d3258}
+    .btn:hover{filter:brightness(1.05)}
+    .btn:active{transform:translateY(1px)}
+    .row{display:flex;gap:8px;align-items:center}
+    #game{display:block;width:100%;height:auto;background:#0a0b18;border-radius:14px;border:1px solid #20223c}
+    .hud{display:flex;justify-content:space-between;align-items:center;margin-top:8px;color:var(--muted);font-weight:600}
+    .tag{padding:6px 10px;border-radius:999px;background:#1b1e37;color:#c3c7dd;border:1px solid #2a2e56}
+    .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;background:#1b1e37;border:1px solid #2a2e56;border-radius:6px;padding:2px 6px}
+    .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;background:#1b1e37;border:1px solid #2a2e56;color:#c3c7dd;border-radius:10px;padding:10px 12px;font-weight:600;opacity:0;transition:opacity .25s ease}
+    .toast.show{opacity:1}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="frame">
+      <header>
+        <h1>🦾 BILLIONS RUNNER <small style="opacity:.7;font-weight:600">(SUPERMASK NFT S2)</small></h1>
+        <div class="row">
+          <button id="btnStart" class="btn">Mulai / Restart</button>
+          <button id="btnPause" class="btn">Pause</button>
+          <button id="btnMute" class="btn">🔊</button>
+        </div>
+      </header>
+      <canvas id="game" width="1340" height="720" aria-label="Game canvas" title="Tap / Spasi untuk lompat"></canvas>
+      <div class="hud">
+        <div>
+          Skor: <span id="score">0</span>
+          &nbsp;•&nbsp; record: <span id="best">0</span>
+          &nbsp;•&nbsp; speed: <span id="speed">1.0x</span>
+          &nbsp;•&nbsp; Obstacle Escape: <span id="passed">0</span>
+        </div>
+        <div class="row">
+          <span class="tag">press <span class="kbd">space</span>/<span class="kbd">↑</span> to jump • <span class="kbd">P</span> for pause</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast">Gambar kustom belum diatur — memakai bentuk default.</div>
+
+<script>
+// === KONFIGURASI ASET ===
+// Ganti path gambar di bawah dengan aset buatanmu. Taruh file di folder yang sama.
+const ASSETS = {
+  player: "assets/player.png",
+  obstacle: "assets/kaktus.png",
+  coin: "assets/billcoin.png",       // koin arena
+  hudCoin: "assets/billcoin.png",     // ⬅️ ikon HUD (gambar milikmu)
+  ground: null,
+  background: "assets/langit.jpg",
+  sfxJump: null, sfxHit: null, sfxCoin: null,
+};
+
+
+// === PARAMETER GAME ===
+const G = {
+  gravity: 2500,     // px/s^2
+  jumpVel: 1300,    // px/s
+  groundY: 570,  // baseline y untuk kaki player
+  playerW: 180,
+  playerH: 150,
+  baseSpeed: 360,    // px/s untuk scroll awal (1.0x)
+  accel: 0,          // dimatikan: kecepatan stabil, dikontrol oleh rintangan lolos
+  obstacleMinGap: 600,
+  obstacleMaxGap: 1000,
+  obstacleMinH: 50,
+  obstacleMaxH: 100,
+  obstacleW: 120,
+  coinW: 60,
+  coinH: 60
+};
+
+// === UTIL ===
+const $ = sel => document.querySelector(sel);
+const rand = (a,b) => a + Math.random()*(b-a);
+const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+
+function loadImage(src){
+  return new Promise((res,rej)=>{
+    if(!src){res(null);return}
+    const img = new Image();
+    img.onload = ()=> res(img);
+    img.onerror = ()=> rej(new Error("Gagal memuat "+src));
+    img.src = src;
+  });
+}
+function loadAudio(src){
+  if(!src) return null;
+  const a = new Audio(src); a.preload = "auto"; return a;
+}
+
+// === STATE ===
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let w = canvas.width, h = canvas.height;
+let running = false, paused = false, tLast=0, speedScale=1, score=0, best=0;
+let obstacles=[], coins=[]; 
+let player; 
+let img = {player:null, obstacle:null, coin:null, hudCoin:null, round:null, bg:null};
+let sfx = {jump:null, hit:null, coin:null};
+let obstaclesPassed = 0; // jumlah rintangan yang sudah dilampaui
+let coinCount = 0;       // jumlah koin yang dikumpulkan
+
+function showToast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(showToast.to);
+  showToast.to = setTimeout(()=> el.classList.remove('show'), 2500);
+}
+
+// === ENTITAS ===
+class Player{
+  constructor(){
+    this.x = 100; this.y = G.groundY - G.playerH; this.vy = 0; this.grounded = true; this.dead=false;
+    this.w = G.playerW; this.h = G.playerH;
+  }
+  jump(){
+    if(this.grounded && !this.dead){
+      this.vy = -G.jumpVel; this.grounded = false; sfx.jump?.play?.();
+    }
+  }
+  update(dt){
+    if(this.dead) return;
+    this.vy += G.gravity * dt;
+    this.y += this.vy * dt;
+    if(this.y >= G.groundY - this.h){
+      this.y = G.groundY - this.h; this.vy = 0; this.grounded = true;
+    }
+  }
+  draw(){
+    if(img.player){
+      ctx.drawImage(img.player, this.x, this.y, this.w, this.h);
+    }else{
+      // fallback: avatar topeng
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.fillStyle = '#6cf';
+      ctx.fillRect(0, 0, this.w, this.h);
+      ctx.fillStyle = '#0e0f1f';
+      ctx.fillRect(8, 14, this.w-16, 10); // visor/mask
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(12, 16, this.w-24, 6);
+      ctx.restore();
+    }
+  }
+  bbox(){return {x:this.x+6,y:this.y+6,w:this.w-12,h:this.h-12}}
+}
+
+class Obstacle{
+  constructor(x){
+    this.w = G.obstacleW; this.h = rand(G.obstacleMinH,G.obstacleMaxH);
+    this.x = x; this.y = G.groundY - this.h; this.counted=false;
+  }
+  update(dt, speed){ this.x -= speed * dt; }
+  off(){ return this.x + this.w < -50 }
+  draw(){
+    if(img.obstacle){
+      ctx.drawImage(img.obstacle, this.x, this.y, this.w, this.h);
+    } else {
+      ctx.fillStyle = '#ffb86b';
+      ctx.fillRect(this.x, this.y, this.w, this.h);
+      ctx.fillStyle = '#ffa14f';
+      ctx.fillRect(this.x+6, this.y+6, this.w-12, this.h-12);
+    }
+  }
+  bbox(){return {x:this.x+2,y:this.y+2,w:this.w-4,h:this.h-4}}
+}
+
+class Coin{
+  constructor(x){
+    this.w = G.coinW; this.h = G.coinH;
+    this.x = x; this.y = G.groundY - G.playerH - 20; // menggantung di atas pemain
+    this.spin = Math.random()*Math.PI*2; // sudut rotasi
+    this.taken = false;
+  }
+  update(dt, speed){ this.x -= speed * dt; this.spin += dt*6; }
+  off(){ return this.x + this.w < -50 }
+  draw(){
+    if(img.coin){
+      ctx.save();
+      ctx.translate(this.x+this.w/2, this.y+this.h/2);
+      ctx.rotate(this.spin);
+      ctx.drawImage(img.coin, -this.w/2, -this.h/2, this.w, this.h);
+      ctx.restore();
+    } else {
+      // fallback: koin berputar (ellips berganti lebar)
+      ctx.save();
+      ctx.translate(this.x+this.w/2, this.y+this.h/2);
+      const phase = (Math.sin(this.spin)*0.5+0.5); // 0..1
+      const rx = clamp(phase* (this.w/2), 4, this.w/2);
+      const ry = this.h/2;
+      ctx.beginPath();
+      for(let a=0; a<Math.PI*2; a+=Math.PI/24){
+        const px = Math.cos(a)*rx, py = Math.sin(a)*ry;
+        if(a===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = '#ffd76b';
+      ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#f6c243'; ctx.stroke();
+      ctx.fillStyle = '#8a6b1f';
+      ctx.font = 'bold 12px ui-monospace,monospace';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('₿',0,0);
+      ctx.restore();
+    }
+  }
+  bbox(){return {x:this.x+3,y:this.y+3,w:this.w-6,h:this.h-6}}
+}
+
+// === GAME FLOW ===
+function reset(){
+  player = new Player();
+  obstacles = []; coins = [];
+  speedScale = 1; score = 0; obstaclesPassed = 0; coinCount = 0; tLast = performance.now();
+  spawnObstaclesInitial();
+}
+
+function spawnObstaclesInitial(){
+  let x = 500;
+  for(let i=0;i<4;i++){
+    obstacles.push(new Obstacle(x));
+    x += rand(G.obstacleMinGap, G.obstacleMaxGap);
+  }
+}
+
+function maybeSpawnObstacle(){
+  const rightMost = obstacles.length? Math.max(...obstacles.map(o=>o.x)) : -Infinity;
+  if(rightMost < w){
+    const start = Math.max(w + rand(80,200), rightMost + rand(G.obstacleMinGap,G.obstacleMaxGap));
+    obstacles.push(new Obstacle(start));
+  }
+}
+
+function spawnCoinAhead(){
+  // letakkan koin sedikit setelah rintangan paling kanan
+  const rightMost = Math.max(
+    obstacles.length? Math.max(...obstacles.map(o=>o.x+o.w)) : 0,
+    coins.length? Math.max(...coins.map(c=>c.x+c.w)) : 0,
+    w
+  );
+  const x = rightMost + rand(120, 240);
+  coins.push(new Coin(x));
+}
+
+function collide(a, b) {
+  return a.x < b.x + b.w - 10 &&   // kurangi 10px kanan
+         a.x + a.w > b.x + 10 &&   // tambah 10px kiri
+         a.y < b.y + b.h - 5 &&    // kurangi 5px bawah
+         a.y + a.h > b.y + 5;      // tambah 5px atas
+}
+
+
+function computeSpeedScale(){
+  // Stabil 1x sampai 10 rintangan; setelah itu tiap 10 rintangan bertambah 0.5x
+  // Contoh: 10->1.0x, 20->1.5x, 30->2.0x, 40->2.5x, dst
+  const tiersOver = Math.floor(Math.max(0, obstaclesPassed - 10) / 10);
+  return 1 + 0.5 * tiersOver;
+}
+
+function update(dt){
+  if(paused || !running) return;
+  speedScale = computeSpeedScale();
+  const speed = (G.baseSpeed * speedScale);
+
+  player.update(dt);
+  for(const o of obstacles) o.update(dt, speed);
+  for(const c of coins) c.update(dt, speed);
+
+  obstacles = obstacles.filter(o=>!o.off());
+  coins = coins.filter(c=>!c.off() && !c.taken);
+  maybeSpawnObstacle();
+
+  // hitung rintangan yang dilewati (bagian kanan rintangan melewati posisi pemain)
+  for(const o of obstacles){
+    if(!o.counted && o.x + o.w < player.x){
+      o.counted = true;
+      obstaclesPassed++;
+      // setiap lewat 5 rintangan munculkan koin
+      if(obstaclesPassed % 5 === 0){
+        spawnCoinAhead();
+      }
+    }
+  }
+
+  // skor bertambah pelan (berdasar jarak)
+  score += dt * Math.round(10*speedScale);
+
+  // tabrakan dengan rintangan
+  for(const o of obstacles){
+    if(collide(player.bbox(), o.bbox())){
+      sfx.hit?.play?.();
+      gameOver();
+      break;
+    }
+  }
+  // ambil koin
+  for(const c of coins){
+    if(!c.taken && collide(player.bbox(), c.bbox())){
+      c.taken = true; coinCount++; sfx.coin?.play?.();
+    }
+  }
+}
+
+function drawBackground(dt, speed){
+  ctx.fillStyle = '#0a0b18';
+  ctx.fillRect(0,0,w,h);
+  if(img.bg){
+    bgOffset = (bgOffset - speed*0.3*dt) % img.bg.width;
+    for(let x = bgOffset; x < w; x += img.bg.width){
+      ctx.drawImage(img.bg, x, 0, img.bg.width, h);
+    }
+  } else {
+    // bintang
+    ctx.save();
+    ctx.globalAlpha = .25;
+    for(let i=0;i<80;i++){
+      const x = (i*97 % w), y=(i*47 % (h-50));
+      ctx.fillStyle = i%2? '#6cf':'#c3c7dd';
+      ctx.fillRect(x, y, 2, 2);
+    }
+    ctx.restore();
+  }
+}
+
+let groundOffset = 0, bgOffset = 0;
+function drawGround(dt, speed){
+  const gy = G.groundY;
+  if(img.ground){
+    const tileW = 64, tileH = 16;
+    groundOffset = (groundOffset - speed*dt) % tileW;
+    for(let x = groundOffset; x < w; x += tileW){
+      ctx.drawImage(img.ground, x, gy, tileW, tileH);
+    }
+  } else {
+    ctx.fillStyle = '#21243f';
+    ctx.fillRect(0, gy, w, 3);
+    ctx.fillStyle = '#1a1d36';
+    for(let i=0;i<30;i++){
+      const x = (i*61 + (Date.now()/30|0)) % w;
+      ctx.fillRect(x, gy+6, 10, 2);
+    }
+  }
+}
+
+function render(dt){
+  const speed = (G.baseSpeed * speedScale);
+  drawBackground(dt, speed);
+  drawGround(dt, speed);
+  player.draw();
+  for(const o of obstacles) o.draw();
+  for(const c of coins) c.draw();
+
+  // UI on-canvas: skor kanan atas
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.font = 'bold 16px system-ui,Segoe UI,Roboto,Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText('Skor: '+Math.floor(score), w-16, 26);
+
+  // UI on-canvas: koin atas tengah
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 18px system-ui,Segoe UI,Roboto,Arial';
+  ctx.fillStyle = '#ffd76b';
+  ctx.fillText('🪙 '+coinCount, w/2, 26);
+}
+
+function frame(ts){
+  const dt = Math.min(0.032, (ts - tLast) / 1000);
+  tLast = ts;
+  update(dt);
+  render(dt);
+  if(running) requestAnimationFrame(frame);
+}
+
+function start(){
+  running = true; paused = false; reset();
+  requestAnimationFrame(ts=>{ tLast = ts; requestAnimationFrame(frame); });
+}
+function pauseToggle(){ paused = !paused; }
+function gameOver(){
+  running = false; paused = false; player.dead = true;
+  best = Math.max(best, Math.floor(score));
+  localStorage.setItem('billions_runner_best', String(best));
+  // overlay Game Over
+  ctx.fillStyle = 'rgba(10,11,24,.7)';
+  ctx.fillRect(0,0,w,h);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 28px system-ui,Segoe UI,Roboto';
+  ctx.fillText('GAME OVER', w/2, h/2 - 12);
+  ctx.font = 'bold 50px system-ui,Segoe UI,Roboto';
+  ctx.fillText('Skor: '+Math.floor(score)+'  •  Rekor: '+best, w/2, h/2 + 14);
+  ctx.fillText('Koin: '+coinCount+'  •  Rintangan: '+obstaclesPassed, w/2, h/2 + 36);
+  ctx.fillText('Klik / tekan Spasi untuk main lagi', w/2, h/2 + 60);
+}
+
+// === INPUT ===
+window.addEventListener('keydown', (e)=>{
+  const k = e.key.toLowerCase();
+  if([' ','arrowup','w'].includes(k)) { e.preventDefault(); player?.jump(); if(!running) start(); }
+  if(k==='p') pauseToggle();
+});
+canvas.addEventListener('pointerdown', ()=>{ player?.jump(); if(!running) start(); });
+
+// === UI BUTTONS ===
+$('#btnStart').onclick = ()=> start();
+$('#btnPause').onclick = ()=> pauseToggle();
+$('#btnMute').onclick = (e)=>{
+  muted = !muted; e.currentTarget.textContent = muted? '🔇' : '🔊';
+  for(const a of Object.values(sfx)) if(a) a.muted = muted;
+};
+
+// === INIT ===
+async function init(){
+  // load best
+  best = parseInt(localStorage.getItem('billions_runner_best')||'0')||0;
+  document.getElementById('best').textContent = best;
+
+  // try load images
+  try{
+    const [p,o,c,g,b] = await Promise.all([
+      loadImage(ASSETS.player),
+      loadImage(ASSETS.obstacle),
+      loadImage(ASSETS.coin),
+      loadImage(ASSETS.ground),
+      loadImage(ASSETS.background),
+    ]);
+    img.player = p; img.obstacle = o; img.coin = c; img.ground = g; img.bg = b;
+    if(!p || !o || !g || !b) showToast('Gambar kustom belum lengkap — memakai bentuk default untuk sebagian.');
+  }catch(err){
+    console.warn(err); showToast('Sebagian aset gagal dimuat — memakai bentuk default.');
+  }
+  // audio
+  sfx.jump = loadAudio(ASSETS.sfxJump);
+  sfx.hit  = loadAudio(ASSETS.sfxHit);
+  sfx.coin = loadAudio(ASSETS.sfxCoin);
+
+  // idle draw: title screen
+  drawBackground(0,0); drawGround(0,0);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = '700 28px system-ui,Segoe UI,Roboto';
+  ctx.fillText('BILLIONS RUNNER', w/2, 120);
+  ctx.font = '600 14px system-ui,Segoe UI,Roboto';
+  ctx.fillText('(SUPERMASK NFT S2)', w/2, 145);
+  ctx.fillText('Tekan Spasi / klik untuk mulai', w/2, 190);
+}
+
+let muted = false;
+init();
+
+// HUD updater
+setInterval(()=>{
+  $('#score').textContent = Math.floor(score);
+  $('#best').textContent = best;
+  $('#speed').textContent = (Math.max(1, speedScale).toFixed(1))+'x';
+  $('#passed').textContent = obstaclesPassed;
+}, 100);
+
+// Responsif: sesuaikan skala canvas (tanpa mengubah world unit)
+function fit(){
+  const rect = canvas.getBoundingClientRect();
+  const ratio = rect.width / w;
+  canvas.style.height = (h*ratio)+"px";
+}
+addEventListener('resize', fit); fit();
+</script>
+</body>
+</html>
